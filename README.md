@@ -2,11 +2,14 @@
 
 A FaaS-based solution that automatically scales BytePlus AutoScaling Groups based on Application Load Balancer (ALB) QPS metrics.
 
+### 🚨 Disclaimer
+This project is for demonstration purposes and should be thoroughly reviewed and tested before using in production environments.
+
 ## Overview
 
 This solution provides QPS-based scaling for GPU instances. Instead of relying on traditional CPU/GPU/Memory utilization metrics, it uses ALB request-per-second data to make scaling decisions. The QPS per instance is calculated by dividing the ALB QPS by the number of instances in the AutoScaling Group.
 
-## ⚠️ Important Note
+### ⚠️ Important Note
 
 **This solution only works for simple 1:1:1 configurations:**
 - **1 Server Group** per ALB
