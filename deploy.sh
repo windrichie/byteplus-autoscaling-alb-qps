@@ -1,0 +1,1 @@
+zip -r ../autoscaling-alb-solution.zip . -x '*.DS_Store' '__MACOSX/*' '.env' 'deploy.sh' 'local/*'

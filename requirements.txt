@@ -1,0 +1,29 @@
+# BytePlus ALB QPS-based AutoScaling Function Dependencies
+# Python 3.10+ required
+
+# Core HTTP and API client dependencies
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Date and time handling
+python-dateutil>=2.8.2
+
+# JSON and data handling (built-in modules used, but listed for clarity)
+# json - built-in
+# hashlib - built-in
+# hmac - built-in
+# urllib.parse - built-in
+# datetime - built-in
+# os - built-in
+# logging - built-in
+# pathlib - built-in
+# typing - built-in
+# dataclasses - built-in (Python 3.7+)
+# traceback - built-in
+
+# Development and testing dependencies (optional)
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.0.0
