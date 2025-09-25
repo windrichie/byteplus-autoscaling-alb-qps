@@ -14,6 +14,7 @@ load_dotenv()
 
 import json
 import logging
+import time
 import traceback
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
@@ -38,6 +39,20 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Returns:
         Dictionary containing execution result
     """
+    # Load configuration first to get the initial delay
+    config = None
+    try:
+        config = load_config()
+        
+        # Apply initial delay for staggered execution (if configured)
+        if config.initial_delay_seconds > 0:
+            print(f"Applying initial delay of {config.initial_delay_seconds} seconds for staggered execution...")
+            time.sleep(config.initial_delay_seconds)
+            
+    except Exception as e:
+        # If config loading fails, continue without delay but log the error
+        print(f"Warning: Could not load config for initial delay: {e}")
+    
     execution_start = datetime.now(timezone.utc)
     
     # Initialize response structure
@@ -57,8 +72,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     }
     
     try:
-        # Step 1: Load and validate configuration
-        config = load_config()
+        # Step 1: Load and validate configuration (reuse if already loaded)
+        if config is None:
+            config = load_config()
         setup_logging(config)
         logger = logging.getLogger(__name__)
         

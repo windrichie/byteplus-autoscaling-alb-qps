@@ -52,6 +52,7 @@ class ScalingConfig:
     # Function Behavior
     log_level: str = "INFO"
     enable_detailed_logging: bool = False
+    initial_delay_seconds: int = 0  # Sleep delay at function start (for staggered execution)
     
     @classmethod
     def from_environment(cls) -> 'ScalingConfig':
@@ -119,7 +120,8 @@ class ScalingConfig:
             
             # Function Behavior
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
-            enable_detailed_logging=get_env_bool('ENABLE_DETAILED_LOGGING', False)
+            enable_detailed_logging=get_env_bool('ENABLE_DETAILED_LOGGING', False),
+            initial_delay_seconds=get_env_int('INITIAL_DELAY_SECONDS', 0),
         )
     
     def validate(self) -> None:
@@ -240,7 +242,8 @@ class ScalingConfig:
             'alert_webhook_url': self.alert_webhook_url,
             # function_timeout removed
             'log_level': self.log_level,
-            'enable_detailed_logging': self.enable_detailed_logging
+            'enable_detailed_logging': self.enable_detailed_logging,
+            'initial_delay_seconds': self.initial_delay_seconds
         }
     
     def __str__(self) -> str:
@@ -367,4 +370,5 @@ ALERT_WEBHOOK_URL=
 # Function Behavior
 LOG_LEVEL=INFO
 ENABLE_DETAILED_LOGGING=false
+INITIAL_DELAY_SECONDS=0
 """

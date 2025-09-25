@@ -112,6 +112,7 @@ ALERT_WEBHOOK_URL=                       # Default: empty (no alerts)
 # Function Behavior
 LOG_LEVEL=INFO                           # Default: INFO
 ENABLE_DETAILED_LOGGING=false            # Default: false
+INITIAL_DELAY_SECONDS=0                  # Default: 0 (no delay)
 ```
 
 ## Metric Period Configuration
@@ -205,6 +206,28 @@ Ensure the AK/SK configured in the function has the following permissions:
 - CloudMonitor: `GetMetricData`
 - AutoScaling: `DescribeScalingGroups`, `ModifyScalingGroup`, `DescribeScalingActivities`
 - TOS: Read/Write access to the state bucket
+
+## Staggered Execution for Sub-Minute Triggering
+
+If your FaaS platform only supports minute-level triggers but you need more frequent scaling evaluations (e.g., every 15 seconds), you can deploy multiple instances of the same function with staggered delays:
+
+### Setup for 15-second intervals:
+
+1. **Function 1**: `INITIAL_DELAY_SECONDS=0`  (executes at 0s)
+2. **Function 2**: `INITIAL_DELAY_SECONDS=15` (executes at 15s)
+3. **Function 3**: `INITIAL_DELAY_SECONDS=30` (executes at 30s)
+4. **Function 4**: `INITIAL_DELAY_SECONDS=45` (executes at 45s)
+
+All functions should have identical configuration except for the `INITIAL_DELAY_SECONDS` value. This creates effective 15-second intervals:
+
+```
+Minute 1: 00s → 15s → 30s → 45s → (next minute)
+Minute 2: 00s → 15s → 30s → 45s → (next minute)
+```
+
+### Important Notes:
+- Each function should use the **same TOS state file** for coordination
+- All functions must have **identical scaling configuration**
 
 ## Monitoring
 
