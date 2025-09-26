@@ -197,7 +197,7 @@ Before deploying this autoscaling solution, ensure you have the following BytePl
 ### 3. Configure TOS Mount
 
 1. Create a TOS bucket for state storage
-2. Mount the bucket to `/tosmount` in the FaaS function
+2. Mount the bucket to `/mnt/tos` in the FaaS function
 3. Ensure the function has read/write permissions
 
 ### 4. Set Up Permissions
@@ -209,24 +209,17 @@ Ensure the AK/SK configured in the function has the following permissions:
 
 ## Staggered Execution for Sub-Minute Triggering
 
-If your FaaS platform only supports minute-level triggers but you need more frequent scaling evaluations (e.g., every 15 seconds), you can deploy multiple instances of the same function with staggered delays:
+If your FaaS platform only supports minute-level triggers but you need more frequent scaling evaluations (e.g., every 30 seconds), you can deploy multiple instances of the same function with staggered delays:
 
-### Setup for 15-second intervals:
+### Setup for 30-second intervals:
 
-1. **Function 1**: `INITIAL_DELAY_SECONDS=0`  (executes at 0s)
-2. **Function 2**: `INITIAL_DELAY_SECONDS=15` (executes at 15s)
-3. **Function 3**: `INITIAL_DELAY_SECONDS=30` (executes at 30s)
-4. **Function 4**: `INITIAL_DELAY_SECONDS=45` (executes at 45s)
+1. **Function 1**: `INITIAL_DELAY_SECONDS=0`  (executes at :00)
+2. **Function 2**: `INITIAL_DELAY_SECONDS=30` (executes at :30)
 
-All functions should have identical configuration except for the `INITIAL_DELAY_SECONDS` value. This creates effective 15-second intervals:
-
-```
-Minute 1: 00s → 15s → 30s → 45s → (next minute)
-Minute 2: 00s → 15s → 30s → 45s → (next minute)
-```
+Note: All functions should have identical configuration except for the `INITIAL_DELAY_SECONDS` value.
 
 ### Important Notes:
-- Each function should use the **same TOS state file** for coordination
+- Each function must use the **same TOS state file** for coordination
 - All functions must have **identical scaling configuration**
 
 ## Monitoring
@@ -256,11 +249,3 @@ Minute 2: 00s → 15s → 30s → 45s → (next minute)
   "execution_time_ms": 1250
 }
 ```
-
-### Key Metrics to Monitor
-
-- Function execution success rate
-- Scaling action frequency
-- QPS per instance trends
-- Error rates and types
-- Cooldown violations
