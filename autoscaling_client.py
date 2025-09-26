@@ -26,8 +26,6 @@ class AutoScalingClient:
             Dictionary containing scaling group information
         """
         try:
-            self.logger.info(f"Describing scaling group: {scaling_group_id}")
-            
             query_params = {
                 "ScalingGroupIds.1": scaling_group_id
             }
@@ -44,7 +42,7 @@ class AutoScalingClient:
                 scaling_groups = response['Result']['ScalingGroups']
                 if scaling_groups:
                     scaling_group = scaling_groups[0]
-                    self.logger.info(f"Scaling group {scaling_group_id} found with {scaling_group.get('TotalInstanceCount', 0)} instances")
+                    # Only log once when first called
                     return scaling_group
                 else:
                     raise ValueError(f"Scaling group {scaling_group_id} not found")
@@ -79,7 +77,7 @@ class AutoScalingClient:
                 "updated_at": scaling_group.get('UpdatedAt')
             }
             
-            self.logger.info(f"Scaling group status: {status_info}")
+            # Only log essential status info, not the full dictionary
             return status_info
             
         except Exception as e:
@@ -104,7 +102,8 @@ class AutoScalingClient:
             # In a production environment, you might want to check instance health status
             healthy_count = status['current_instances']
             
-            self.logger.info(f"Healthy instances in {scaling_group_id}: {healthy_count}")
+            # Log consolidated scaling group info once
+            self.logger.info(f"Scaling group {scaling_group_id}: {healthy_count}/{status['desired_instances']} instances (min:{status['min_instances']}, max:{status['max_instances']})")
             return healthy_count
             
         except Exception as e:
@@ -156,8 +155,6 @@ class AutoScalingClient:
             if final_desired < final_min or final_desired > final_max:
                 raise ValueError(f"Desired capacity {final_desired} must be between min {final_min} and max {final_max}")
             
-            self.logger.info(f"Modifying scaling group {scaling_group_id} capacity")
-            
             response = self.api_client.make_json_request(
                 method="GET",
                 service=self.service,
@@ -166,7 +163,7 @@ class AutoScalingClient:
                 query_params=query_params
             )
             
-            self.logger.info(f"Successfully modified scaling group capacity: {response}")
+            self.logger.info("Successfully modified scaling group capacity")
             return response
             
         except Exception as e:
@@ -267,8 +264,6 @@ class AutoScalingClient:
             if end_time:
                 query_params["EndTime"] = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            self.logger.info(f"Fetching scaling activities for {scaling_group_id}")
-            
             response = self.api_client.make_json_request(
                 method="GET",
                 service=self.service,
@@ -279,7 +274,9 @@ class AutoScalingClient:
             
             if 'Result' in response and 'ScalingActivities' in response['Result']:
                 activities = response['Result']['ScalingActivities']
-                self.logger.info(f"Found {len(activities)} scaling activities")
+                # Only log if there are recent activities
+                if activities:
+                    self.logger.info(f"Found {len(activities)} recent scaling activities")
                 return activities
             else:
                 self.logger.warning(f"No scaling activities found: {response}")

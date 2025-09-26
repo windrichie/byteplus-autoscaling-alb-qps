@@ -304,7 +304,7 @@ class ScalingEngine:
             # Clear error count on successful operation
             self.state_manager.clear_error_count()
             
-            self.logger.info(f"Scale-up executed successfully: {result}")
+            self.logger.info("Scale-up executed successfully")
             return {"status": "success", "result": result}
             
         except Exception as e:
@@ -334,7 +334,7 @@ class ScalingEngine:
             # Clear error count on successful operation
             self.state_manager.clear_error_count()
             
-            self.logger.info(f"Scale-down executed successfully: {result}")
+            self.logger.info("Scale-down executed successfully")
             return {"status": "success", "result": result}
             
         except Exception as e:

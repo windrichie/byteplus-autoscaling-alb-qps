@@ -171,19 +171,13 @@ class CloudMonitorClient:
             # based on the time range (this will trigger the granular period logic)
             metrics_data = self.get_alb_qps_metrics(alb_id, start_time, end_time)
             
-            # Debug: Print full metrics_data response for troubleshooting
-            self.logger.info(f"Full metrics_data response for ALB {alb_id} (period: {period_description}): {metrics_data}")
-            
             # Parse the response to calculate average
             if 'Result' in metrics_data and 'Data' in metrics_data['Result']:
                 data_response = metrics_data['Result']['Data']
                 
-                self.logger.debug(f"CloudMonitor response: {data_response}")
-                
                 # Extract data points from the nested structure
                 if 'MetricDataResults' in data_response and data_response['MetricDataResults']:
                     metric_results = data_response['MetricDataResults'][0]  # Get first metric result
-                    self.logger.info(f"Metric results structure: {metric_results}")
                     
                     if 'DataPoints' in metric_results and metric_results['DataPoints']:
                         data_points = metric_results['DataPoints']
@@ -191,7 +185,7 @@ class CloudMonitorClient:
                         qps_values = [float(point.get('Value', 0)) for point in data_points]
                         average_qps = sum(qps_values) / len(qps_values)
                         
-                        self.logger.info(f"Average QPS for ALB {alb_id} over {period_description}: {average_qps:.2f}")
+                        self.logger.info(f"Average QPS over {period_description}: {average_qps:.2f}")
                         return average_qps
                     else:
                         self.logger.warning(f"No data points found in metric results for ALB {alb_id}")

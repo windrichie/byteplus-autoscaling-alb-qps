@@ -136,7 +136,7 @@ METRIC_PERIOD=30     # 30 seconds - Very responsive, monitor for issues
 
 - **Minimum supported**: 10 seconds (with warnings)
 - **API Optimization**: The system automatically selects appropriate CloudMonitor intervals:
-  - ≤30s range → 10s intervals
+  - ≤30s range → 15s intervals
   - ≤2min range → 30s intervals  
   - ≤10min range → 1min intervals
   - >10min range → 5min intervals
