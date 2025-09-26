@@ -43,7 +43,7 @@ class CloudMonitorClient:
             time_range_minutes = time_range_seconds / 60
             
             if time_range_seconds <= 30:
-                period = "10s"  # For very short ranges (≤30s), use 10-second intervals
+                period = "15s"  # For very short ranges (≤30s), use 15-second intervals
             elif time_range_seconds <= 120:
                 period = "30s"  # For ranges ≤2 minutes, use 30-second intervals
             elif time_range_minutes <= 10:
@@ -151,25 +151,28 @@ class CloudMonitorClient:
             self.logger.error(f"Failed to get latest QPS for ALB {alb_id}: {e}")
             return None
     
-    def get_average_qps(self, alb_id: str, period_minutes: int = 10) -> Optional[float]:
+    def get_average_qps(self, alb_id: str, period_seconds: int = 600) -> Optional[float]:
         """
         Get the average QPS over a specified period.
         
         Args:
             alb_id: ALB resource ID
-            period_minutes: Period to calculate average over
+            period_seconds: Period to calculate average over (in seconds)
             
         Returns:
             Average QPS value or None if no data available
         """
         try:
             end_time = datetime.now(timezone.utc)
-            start_time = end_time - timedelta(minutes=period_minutes)
+            start_time = end_time - timedelta(seconds=period_seconds)
+            period_description = f"{period_seconds}s"
             
+            # Call get_alb_qps_metrics without specifying period to let it auto-calculate
+            # based on the time range (this will trigger the granular period logic)
             metrics_data = self.get_alb_qps_metrics(alb_id, start_time, end_time)
             
             # Debug: Print full metrics_data response for troubleshooting
-            self.logger.info(f"Full metrics_data response for ALB {alb_id}: {metrics_data}")
+            self.logger.info(f"Full metrics_data response for ALB {alb_id} (period: {period_description}): {metrics_data}")
             
             # Parse the response to calculate average
             if 'Result' in metrics_data and 'Data' in metrics_data['Result']:
@@ -188,7 +191,7 @@ class CloudMonitorClient:
                         qps_values = [float(point.get('Value', 0)) for point in data_points]
                         average_qps = sum(qps_values) / len(qps_values)
                         
-                        self.logger.info(f"Average QPS for ALB {alb_id} over {period_minutes}m: {average_qps:.2f}")
+                        self.logger.info(f"Average QPS for ALB {alb_id} over {period_description}: {average_qps:.2f}")
                         return average_qps
                     else:
                         self.logger.warning(f"No data points found in metric results for ALB {alb_id}")

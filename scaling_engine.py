@@ -120,12 +120,10 @@ class ScalingEngine:
             Tuple of (current_qps, current_instances)
         """
         try:
-            # Get QPS metrics
-            # Convert metric_period from seconds to minutes, with minimum of 1 minute
-            period_minutes = max(1, self.config.metric_period / 60)
+            # Get QPS metrics using metric_period directly in seconds
             current_qps = self.cloudmonitor_client.get_average_qps(
                 self.config.alb_id, 
-                period_minutes=period_minutes
+                period_seconds=self.config.metric_period
             )
             
             # Get current instance count
