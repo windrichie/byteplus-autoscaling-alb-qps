@@ -2,3 +2,4 @@
 tosmount/
 local/
 __pycache__*
+tests/
