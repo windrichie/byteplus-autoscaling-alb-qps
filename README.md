@@ -40,6 +40,8 @@ This solution provides QPS-based scaling for GPU instances. Instead of relying o
 ## Features
 
 - **QPS-based Scaling**: Scale based on actual request load rather than resource utilization
+- **Dynamic Scaling**: Calculate exact instances needed to achieve target QPS (vs traditional incremental scaling)
+- **Configurable Safety Limits**: Optional per-action scaling limits with flexible configuration
 - **Configurable Thresholds**: Customizable scale-up/scale-down thresholds with hysteresis
 - **Cooldown Management**: Prevents oscillation with configurable cooldown periods
 - **State Persistence**: Uses TOS mount for reliable state management
@@ -77,12 +79,19 @@ SECRET_ACCESS_KEY=your_secret_key
 
 # Core Scaling Parameters (Required)
 TARGET_QPS_PER_INSTANCE=50
+
+# QPS Thresholds (Only used in static mode - ignored in dynamic mode)
 SCALE_UP_THRESHOLD=0.8
 SCALE_DOWN_THRESHOLD=0.6
 
-# Scaling Behavior (Required - must be > 0)
-SCALE_UP_INCREMENT=1
-SCALE_DOWN_DECREMENT=1
+# Scaling Behavior
+SCALE_UP_INCREMENT=1                     # Used when dynamic scaling is disabled
+SCALE_DOWN_DECREMENT=1                   # Used when dynamic scaling is disabled
+
+# Dynamic Scaling (New)
+ENABLE_DYNAMIC_SCALING=true              # Default: true (calculate exact instances needed)
+MAX_SCALE_UP_PER_ACTION=0                # Default: 0 (no limit, rely on ASG max)
+MAX_SCALE_DOWN_PER_ACTION=0              # Default: 0 (no limit, rely on ASG min)
 
 # Metric Collection (Required - must be > 0)
 METRIC_PERIOD=300
@@ -114,6 +123,29 @@ LOG_LEVEL=INFO                           # Default: INFO
 ENABLE_DETAILED_LOGGING=false            # Default: false
 INITIAL_DELAY_SECONDS=0                  # Default: 0 (no delay)
 ```
+
+## Dynamic Scaling
+
+The solution supports two scaling modes:
+
+### **Dynamic Mode** (Default: `ENABLE_DYNAMIC_SCALING=true`)
+Calculates exact instances needed to achieve target QPS and scales directly to optimal capacity. **Thresholds are ignored** for maximum cost efficiency.
+
+**Example** (TARGET_QPS_PER_INSTANCE=10):
+- QPS=100, instances=5 → optimal=10 → **scale up by 5**
+- QPS=20, instances=10 → optimal=2 → **scale down by 8**
+- QPS=53, instances=10 → optimal=6 → **scale down by 4** (40% cost savings)
+
+### **Static Mode** (`ENABLE_DYNAMIC_SCALING=false`)
+Traditional threshold-based scaling with fixed increments (backward compatible).
+
+**Example**:
+- QPS above threshold → **scale up by 1** (SCALE_UP_INCREMENT)
+- QPS below threshold → **scale down by 1** (SCALE_DOWN_DECREMENT)
+
+### **Safety Limits**
+- `MAX_SCALE_UP_PER_ACTION=0` → No limit (rely on ASG max)
+- `MAX_SCALE_UP_PER_ACTION=3` → Never add more than 3 instances per action
 
 ## Metric Period Configuration
 
@@ -235,7 +267,9 @@ Note: All functions should have identical configuration except for the `INITIAL_
   "result": {
     "action": "scale_up",
     "status": "success",
-    "message": "qps_above_threshold",
+    "message": "dynamic_scaling_scale_up",
+    "scaling_amount": 5,
+    "optimal_instances": 10,
     "details": {
       "current_qps": 120.5,
       "current_instances": 2,
@@ -243,7 +277,8 @@ Note: All functions should have identical configuration except for the `INITIAL_
       "target_qps_per_instance": 50,
       "scale_up_threshold": 40,
       "scale_down_threshold": 30,
-      "dry_run": false
+      "dry_run": false,
+      "limited_by_safety": false
     }
   },
   "execution_time_ms": 1250

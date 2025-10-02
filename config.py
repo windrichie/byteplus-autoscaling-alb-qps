@@ -24,6 +24,11 @@ class ScalingConfig:
     scale_up_increment: int = 1
     scale_down_decrement: int = 1
     
+    # Dynamic Scaling Configuration
+    enable_dynamic_scaling: bool = True
+    max_scale_up_per_action: int = 0  # 0 = no limit, rely on ASG max
+    max_scale_down_per_action: int = 0  # 0 = no limit, rely on ASG min
+    
     # Cooldown Periods (seconds)
     scale_up_cooldown: int = 300  # 5 minutes
     scale_down_cooldown: int = 600  # 10 minutes
@@ -92,6 +97,11 @@ class ScalingConfig:
             # Scaling Behavior
             scale_up_increment=get_env_int('SCALE_UP_INCREMENT', 1),
             scale_down_decrement=get_env_int('SCALE_DOWN_DECREMENT', 1),
+            
+            # Dynamic Scaling Configuration
+            enable_dynamic_scaling=get_env_bool('ENABLE_DYNAMIC_SCALING', True),
+            max_scale_up_per_action=get_env_int('MAX_SCALE_UP_PER_ACTION', 0),
+            max_scale_down_per_action=get_env_int('MAX_SCALE_DOWN_PER_ACTION', 0),
             
             # Cooldown Periods
             scale_up_cooldown=get_env_int('SCALE_UP_COOLDOWN', 300),
@@ -228,6 +238,9 @@ class ScalingConfig:
             # min_instances, max_instances, desired_instances removed - using ASG
             'scale_up_increment': self.scale_up_increment,
             'scale_down_decrement': self.scale_down_decrement,
+            'enable_dynamic_scaling': self.enable_dynamic_scaling,
+            'max_scale_up_per_action': self.max_scale_up_per_action,
+            'max_scale_down_per_action': self.max_scale_down_per_action,
             'scale_up_cooldown': self.scale_up_cooldown,
             'scale_down_cooldown': self.scale_down_cooldown,
             'general_cooldown': self.general_cooldown,
@@ -341,6 +354,11 @@ DESIRED_INSTANCES=2
 # Scaling Behavior
 SCALE_UP_INCREMENT=1
 SCALE_DOWN_DECREMENT=1
+
+# Dynamic Scaling Configuration
+ENABLE_DYNAMIC_SCALING=true
+MAX_SCALE_UP_PER_ACTION=0
+MAX_SCALE_DOWN_PER_ACTION=0
 
 # Cooldown Periods (seconds)
 SCALE_UP_COOLDOWN=300

@@ -9,8 +9,8 @@ Author: AI Assistant
 Version: 1.0
 """
 
-from dotenv import load_dotenv
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 
 import json
 import logging
@@ -202,8 +202,7 @@ def handle_scaling_evaluation(scaling_engine: ScalingEngine) -> Dict[str, Any]:
                 "current_instances": decision_result.get("current_instances"),
                 "qps_per_instance": decision_result.get("qps_per_instance"),
                 "target_qps_per_instance": decision_result.get("target_qps_per_instance"),
-                "scale_up_threshold": decision_result.get("scale_up_threshold"),
-                "scale_down_threshold": decision_result.get("scale_down_threshold"),
+                "scaling_amount": decision_result.get("scaling_amount"),
                 "dry_run": decision_result.get("dry_run", False),
                 "execution_result": decision_result.get("execution_result")
             }
@@ -214,6 +213,14 @@ def handle_scaling_evaluation(scaling_engine: ScalingEngine) -> Dict[str, Any]:
         
         if decision_result.get("cooldown_remaining"):
             result["details"]["cooldown_remaining_seconds"] = decision_result["cooldown_remaining"]
+        
+        # Add dynamic scaling specific fields if available
+        if decision_result.get("optimal_instances") is not None:
+            result["details"]["optimal_instances"] = decision_result["optimal_instances"]
+        if decision_result.get("required_change") is not None:
+            result["details"]["required_change"] = decision_result["required_change"]
+        if decision_result.get("limited_by_safety") is not None:
+            result["details"]["limited_by_safety"] = decision_result["limited_by_safety"]
         
         logger.info(f"Scaling evaluation completed: {result['action']} - {result['message']}")
         return result
