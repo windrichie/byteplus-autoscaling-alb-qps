@@ -4,9 +4,6 @@ Byteplus ALB QPS-based AutoScaling FaaS Function
 
 This function monitors ALB QPS metrics and automatically scales an AutoScaling Group
 based on configurable thresholds and cooldown periods.
-
-Author: AI Assistant
-Version: 1.0
 """
 
 # from dotenv import load_dotenv
