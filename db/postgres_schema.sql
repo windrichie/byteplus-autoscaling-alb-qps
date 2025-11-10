@@ -124,41 +124,4 @@ CREATE TABLE IF NOT EXISTS errors (
 CREATE INDEX IF NOT EXISTS idx_errors_group ON errors (resource_group_id);
 CREATE INDEX IF NOT EXISTS idx_errors_occurred ON errors (occurred_at DESC);
 
--- 5) Locks: optional table-backed distributed lock
--- If you choose not to use Postgres advisory locks, this provides a lease-based lock per resource group.
--- CREATE TABLE IF NOT EXISTS locks (
---     resource_group_id BIGINT PRIMARY KEY REFERENCES resource_groups(id) ON DELETE CASCADE,
---     owner TEXT NOT NULL,                -- e.g., function instance or host identifier
---     acquired_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
---     expires_at TIMESTAMPTZ NOT NULL,    -- set short lease (e.g., NOW() + INTERVAL '30 seconds')
---     metadata JSONB NULL
--- );
-
--- CREATE INDEX IF NOT EXISTS idx_locks_expires ON locks (expires_at);
-
--- Recommended lock acquisition pattern (application-side):
---   INSERT INTO locks(resource_group_id, owner, expires_at)
---   VALUES($1, $2, NOW() + INTERVAL '30 seconds')
---   ON CONFLICT (resource_group_id) DO NOTHING;        -- success iff row inserted
---   To renew: UPDATE locks SET expires_at = NOW() + INTERVAL '30 seconds' WHERE resource_group_id = $1 AND owner = $2;
---   To release: DELETE FROM locks WHERE resource_group_id = $1 AND owner = $2;
---   Cleanup: DELETE FROM locks WHERE expires_at < NOW();
-
--- 6) Optional: function run bookkeeping for observability
--- CREATE TABLE IF NOT EXISTS function_runs (
---     id BIGSERIAL PRIMARY KEY,
---     function_name TEXT NOT NULL, -- e.g., 'faas_runner_A' | 'faas_runner_B'
---     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
---     completed_at TIMESTAMPTZ NULL,
---     evaluated_groups INTEGER NOT NULL DEFAULT 0,
---     errors_count INTEGER NOT NULL DEFAULT 0,
---     notes TEXT NULL
--- );
-
 COMMIT;
-
--- Advisory locks alternative (no table) — for documentation:
--- Acquire: SELECT pg_try_advisory_lock(1263, resource_group_id);  -- 1263 is a chosen namespace, change as needed
--- Release: SELECT pg_advisory_unlock(1263, resource_group_id);
--- Check held: SELECT pg_advisory_lock_shared(1263, resource_group_id); -- or pg_advisory_lock for blocking
--- Recommended: Use pg_try_advisory_lock in application with timeout/backoff to avoid contention.
