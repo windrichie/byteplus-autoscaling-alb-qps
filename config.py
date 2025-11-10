@@ -2,7 +2,11 @@ import os
 import sys
 import logging
 import dataclasses
+import contextvars
 from typing import Optional, Dict, Any
+
+# Context var to inject per-group prefix into log records
+log_prefix_var = contextvars.ContextVar('log_prefix', default='')
 
 
 @dataclasses.dataclass
@@ -331,9 +335,9 @@ def setup_logging(config: ScalingConfig) -> None:
     
     # Configure logging format
     if config.enable_detailed_logging:
-        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(group_prefix)s%(message)s'
     else:
-        log_format = '%(asctime)s - %(levelname)s - %(message)s'
+        log_format = '%(asctime)s - %(levelname)s - %(group_prefix)s%(message)s'
     
     # Clear any existing handlers to avoid duplicates
     root_logger = logging.getLogger()
@@ -351,6 +355,14 @@ def setup_logging(config: ScalingConfig) -> None:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     stream_handler.setFormatter(formatter)
+
+    # Inject group_prefix from context var into every LogRecord
+    orig_factory = logging.getLogRecordFactory()
+    def record_factory(*args, **kwargs):
+        record = orig_factory(*args, **kwargs)
+        record.group_prefix = log_prefix_var.get()
+        return record
+    logging.setLogRecordFactory(record_factory)
     
     # Configure root logger
     root_logger.setLevel(log_level)

@@ -345,7 +345,7 @@ class ScalingEngine:
         if action in cooldown_checks:
             cooldown_period = cooldown_checks[action]
             if cooldown_period > 0:
-                activity_type = "ScaleOut" if action == "scale_up" else "ScaleIn"
+                activity_type = "SCALE_OUT" if action == "scale_up" else "SCALE_IN"
                 last_specific_time = self._get_latest_activity_time(activity_type)
                 remaining_specific = self._get_remaining_cooldown_from_time(last_specific_time, cooldown_period)
                 if remaining_specific > 0:
@@ -502,7 +502,7 @@ class ScalingEngine:
             )
 
             # Update cooldown state
-            self.state_manager.update_cooldown_state(self.config.autoscaling_group_id, self.config.scale_up_cooldown)
+            self.state_manager.update_cooldown_state(self.config.resource_group_id, self.config.scale_up_cooldown)
 
             self.logger.info("Scale-up executed successfully")
             return {"status": "success", "result": result}
@@ -511,7 +511,7 @@ class ScalingEngine:
             error_msg = f"Scale-up execution failed: {str(e)}"
             self.logger.error(error_msg)
             self.state_manager.record_error(
-                group_id=self.config.autoscaling_group_id,
+                group_id=self.config.resource_group_id,
                 source="scale_up_execution",
                 message=error_msg,
                 context={"scaling_amount": scaling_amount}
@@ -537,7 +537,7 @@ class ScalingEngine:
             )
 
             # Update cooldown state
-            self.state_manager.update_cooldown_state(self.config.autoscaling_group_id, self.config.scale_down_cooldown)
+            self.state_manager.update_cooldown_state(self.config.resource_group_id, self.config.scale_down_cooldown)
 
             self.logger.info("Scale-down executed successfully")
             return {"status": "success", "result": result}
@@ -546,7 +546,7 @@ class ScalingEngine:
             error_msg = f"Scale-down execution failed: {str(e)}"
             self.logger.error(error_msg)
             self.state_manager.record_error(
-                group_id=self.config.autoscaling_group_id,
+                group_id=self.config.resource_group_id,
                 source="scale_down_execution",
                 message=error_msg,
                 context={"scaling_amount": scaling_amount}

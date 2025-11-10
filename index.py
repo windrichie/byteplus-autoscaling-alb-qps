@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 # Import our custom modules
 from config import ScalingConfig, setup_logging, load_config
+from config import log_prefix_var
 from byteplus_api_client import BytePlusAPIClient
 from cloudmonitor_client import CloudMonitorClient
 from autoscaling_client import AutoScalingClient
@@ -158,7 +159,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         try:
             if 'state_manager' in locals():
                 state_manager.record_error(
-                    group_id=0,  # General error not specific to a group
+                    group_id=None,  # General error not specific to a group; allow NULL per schema
                     source="handler",
                     message=error_msg,
                     context={"event": event, "traceback": traceback.format_exc()}
@@ -213,6 +214,11 @@ def evaluate_single_group(group: Dict[str, Any], current_qps: Optional[float], c
     """
     # Create a new ScalingEngine for each group to isolate state and config
     group_config = config.copy_with_group(group)
+
+    # Set per-group log prefix for readability
+    prefix = f"[Group id={group_config.resource_group_id} ALB={group_config.alb_id} ASG={group_config.autoscaling_group_id} region={group_config.region}] "
+    log_prefix_var.set(prefix)
+
     engine = ScalingEngine(
         config=group_config,
         state_manager=state_manager, # State manager can be shared if it handles state per group
