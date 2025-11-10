@@ -26,6 +26,8 @@ from cloudmonitor_client import CloudMonitorClient
 from autoscaling_client import AutoScalingClient
 from state_manager import StateManager
 from scaling_engine import ScalingEngine
+from db_manager import DBManager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -39,6 +41,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Returns:
         Dictionary containing execution result
     """
+    # Ensure a logger is available even if configuration fails later
+    logger = logging.getLogger(__name__)
+
     # Load configuration first to get the initial delay
     config = None
     try:
@@ -90,27 +95,20 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         cloudmonitor_client = CloudMonitorClient(api_client)
         autoscaling_client = AutoScalingClient(api_client)
-        state_manager = StateManager(
-            tos_mount_path=config.tos_mount_path,
-            state_file=config.tos_state_file
-        )
-        
-        scaling_engine = ScalingEngine(
-            config=config,
-            state_manager=state_manager,
-            cloudmonitor_client=cloudmonitor_client,
-            autoscaling_client=autoscaling_client
-        )
-        
+        db_manager = DBManager(dsn=config.db_dsn)
+        state_manager = StateManager(db_manager)
+
         # Step 3: Handle different event types
         event_type = event.get('type', 'scaling_evaluation')
-        
+
         if event_type == 'validation':
-            result = handle_validation(scaling_engine)
+            # Validation might need to be re-thought in a multi-group context
+            # For now, we can validate the first group found or a specific one if provided
+            result = handle_validation_for_all(db_manager, config, state_manager, cloudmonitor_client, autoscaling_client)
         elif event_type == 'status':
-            result = handle_status_check(scaling_engine)
+            result = handle_status_check_for_all(db_manager, config, state_manager, cloudmonitor_client, autoscaling_client)
         elif event_type in ['scaling_evaluation', 'faas.timer.event']:
-            result = handle_scaling_evaluation(scaling_engine)
+            result = handle_batch_scaling_evaluation(db_manager, config, state_manager, cloudmonitor_client, autoscaling_client)
         else:
             result = {
                 "action": "error",
@@ -138,15 +136,15 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         print("\n=== Autoscaling Function Execution Result ===")
         print(json.dumps(response, indent=2, ensure_ascii=False))
         print("\n=== Execution Completed ===")
-        
+
         return response
-        
+
     except Exception as e:
         # Handle any unexpected errors
-        error_msg = f"Unexpected error in lambda_handler: {str(e)}"
+        error_msg = f"Unexpected error in handler: {str(e)}"
         logger.error(error_msg)
         logger.error(f"Traceback: {traceback.format_exc()}")
-        
+
         response["statusCode"] = 500
         response["result"] = {
             "action": "error",
@@ -158,20 +156,73 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "message": str(e),
             "traceback": traceback.format_exc()
         }
-        
+
         # Try to record error in state if possible
         try:
             if 'state_manager' in locals():
-                state_manager.record_error(error_msg, "lambda_handler")
+                state_manager.record_error(
+                    group_id=0,  # General error not specific to a group
+                    source="handler",
+                    message=error_msg,
+                    context={"event": event, "traceback": traceback.format_exc()}
+                )
         except:
             pass  # Don't let error recording cause additional failures
-        
+
         # Print result
         print("\n=== Autoscaling Function Execution Result ===")
         print(json.dumps(response, indent=2, ensure_ascii=False))
         print("\n=== Execution Completed ===")
 
         return response
+
+
+def handle_batch_scaling_evaluation(db_manager: DBManager, config: ScalingConfig, state_manager: StateManager, cloudmonitor_client: CloudMonitorClient, autoscaling_client: AutoScalingClient) -> Dict[str, Any]:
+    """
+    Handles scaling evaluation for all enabled resource groups concurrently.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("Starting batch scaling evaluation for all enabled resource groups.")
+
+    try:
+        resource_groups = db_manager.get_enabled_resource_groups()
+        if not resource_groups:
+            return {"action": "none", "status": "success", "message": "No enabled resource groups found."}
+
+        alb_ids = [rg['alb_id'] for rg in resource_groups]
+        avg_qps_map = cloudmonitor_client.get_average_qps_batch(alb_ids, period_seconds=config.metric_period)
+
+        results = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_group = {executor.submit(evaluate_single_group, rg, avg_qps_map.get(rg['alb_id']), config, state_manager, cloudmonitor_client, autoscaling_client): rg for rg in resource_groups}
+            for future in as_completed(future_to_group):
+                group = future_to_group[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as exc:
+                    logger.error(f"Error processing resource group {group['id']}: {exc}")
+                    results.append({"group_id": group['id'], "action": "error", "status": "error", "message": str(exc)})
+
+        return {"action": "batch_evaluation", "status": "success", "results": results}
+
+    except Exception as e:
+        logger.error(f"Failed during batch scaling evaluation: {e}")
+        return {"action": "error", "status": "error", "message": str(e)}
+
+def evaluate_single_group(group: Dict[str, Any], current_qps: Optional[float], config: ScalingConfig, state_manager: StateManager, cloudmonitor_client: CloudMonitorClient, autoscaling_client: AutoScalingClient) -> Dict[str, Any]:
+    """
+    Evaluates scaling for a single resource group.
+    """
+    # Create a new ScalingEngine for each group to isolate state and config
+    group_config = config.copy_with_group(group)
+    engine = ScalingEngine(
+        config=group_config,
+        state_manager=state_manager, # State manager can be shared if it handles state per group
+        cloudmonitor_client=cloudmonitor_client,
+        autoscaling_client=autoscaling_client
+    )
+    return engine.evaluate_scaling_decision(prefetched_qps=current_qps)
 
 
 def handle_scaling_evaluation(scaling_engine: ScalingEngine) -> Dict[str, Any]:
@@ -236,9 +287,17 @@ def handle_scaling_evaluation(scaling_engine: ScalingEngine) -> Dict[str, Any]:
         }
 
 
+def handle_status_check_for_all(db_manager: DBManager, config: ScalingConfig, state_manager: StateManager, cloudmonitor_client: CloudMonitorClient, autoscaling_client: AutoScalingClient) -> Dict[str, Any]:
+    return {"status": "success", "message": "Status check for all groups not fully implemented yet."}
+
+
+def handle_validation_for_all(db_manager: DBManager, config: ScalingConfig, state_manager: StateManager, cloudmonitor_client: CloudMonitorClient, autoscaling_client: AutoScalingClient) -> Dict[str, Any]:
+    return {"status": "success", "message": "Validation for all groups not fully implemented yet."}
+
+
 def handle_status_check(scaling_engine: ScalingEngine) -> Dict[str, Any]:
     """
-    Handle status check requests.
+    Handle a status check for the configured scaling group.
     
     Args:
         scaling_engine: Configured scaling engine instance

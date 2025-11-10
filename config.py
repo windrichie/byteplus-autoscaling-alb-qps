@@ -1,30 +1,21 @@
 import os
 import sys
 import logging
+import dataclasses
 from typing import Optional, Dict, Any
-from dataclasses import dataclass
 
 
-@dataclass
+@dataclasses.dataclass
 class ScalingConfig:
     """
-    Configuration class for autoscaling parameters.
-    All values can be set via environment variables.
+    Configuration for the autoscaling logic, loaded from environment variables.
     """
-    
-    # Core Scaling Parameters
-    target_qps_per_instance: float = 50.0
-    scale_up_threshold: float = 0.8  # Scale up when at 80% of target
-    scale_down_threshold: float = 0.6  # Scale down when below 60% of target
-    
-    # Instance Limits (fetched from ASG at runtime)
-    # min_instances, max_instances, desired_instances removed - using ASG as source of truth
-    
-    # Scaling Behavior
-    scale_up_increment: int = 1
-    scale_down_decrement: int = 1
-    
-    # Dynamic Scaling Configuration
+    # Core scaling parameters
+    target_qps_per_instance: float = 100.0
+    scale_up_threshold: float = 0.8  # Scale up if QPS/instance > target * threshold
+    scale_down_threshold: float = 0.4  # Scale down if QPS/instance < target * threshold
+
+    # Dynamic scaling limits
     enable_dynamic_scaling: bool = True
     max_scale_up_per_action: int = 0  # 0 = no limit, rely on ASG max
     max_scale_down_per_action: int = 0  # 0 = no limit, rely on ASG min
@@ -36,29 +27,35 @@ class ScalingConfig:
     
     # Metric Collection
     metric_period: int = 300  # 5 minutes
-    
-    # BytePlus Cloud Configuration
+
+    # BytePlus Cloud Configuration (will be overridden by group-specific settings)
     autoscaling_group_id: str = ""
     alb_id: str = ""
     region: str = "ap-southeast-1"
-    
-    # Storage Configuration
+
+    # Resource group identifier (from DB)
+    resource_group_id: int = 0
+
+    # Storage for state management
     tos_mount_path: str = "/tosmount"
     tos_state_file: str = "scaling_state.json"
-    
-    # API Configuration
+
+    # API credentials
     access_key_id: str = ""
     secret_access_key: str = ""
-    
-    # Safety & Monitoring
+
+    # Database configuration
+    db_dsn: str = ""
+
+    # Safety and Monitoring
     dry_run_mode: bool = False
     alert_webhook_url: str = ""
-    
-    # Function Behavior
+
+    # Function behavior
     log_level: str = "INFO"
     enable_detailed_logging: bool = False
-    initial_delay_seconds: int = 0  # Sleep delay at function start (for staggered execution)
-    
+    initial_delay_seconds: int = 0
+
     @classmethod
     def from_environment(cls) -> 'ScalingConfig':
         """
@@ -94,9 +91,7 @@ class ScalingConfig:
             # Instance Limits (fetched from ASG at runtime)
             # min_instances, max_instances, desired_instances removed
             
-            # Scaling Behavior
-            scale_up_increment=get_env_int('SCALE_UP_INCREMENT', 1),
-            scale_down_decrement=get_env_int('SCALE_DOWN_DECREMENT', 1),
+            # Scaling Behavior is now based on calculated target capacity.
             
             # Dynamic Scaling Configuration
             enable_dynamic_scaling=get_env_bool('ENABLE_DYNAMIC_SCALING', True),
@@ -124,6 +119,9 @@ class ScalingConfig:
             access_key_id=os.getenv('ACCESS_KEY_ID', ''),
             secret_access_key=os.getenv('SECRET_ACCESS_KEY', ''),
             
+            # Database Configuration
+            db_dsn=os.getenv('DB_DSN', ''),
+            
             # Safety & Monitoring
             dry_run_mode=get_env_bool('DRY_RUN_MODE', False),
             alert_webhook_url=os.getenv('ALERT_WEBHOOK_URL', ''),
@@ -143,13 +141,7 @@ class ScalingConfig:
         """
         errors = []
         
-        # Validate required fields
-        if not self.autoscaling_group_id:
-            errors.append("AUTOSCALING_GROUP_ID is required")
-        
-        if not self.alb_id:
-            errors.append("ALB_ID is required")
-        
+        # Validate required fields (multi-group mode does not require global ASG/ALB)
         if not self.access_key_id:
             errors.append("ACCESS_KEY_ID is required")
         
@@ -168,13 +160,6 @@ class ScalingConfig:
         
         # Instance limits validation removed - using ASG as source of truth
         
-        # Validate scaling behavior
-        if self.scale_up_increment <= 0:
-            errors.append("SCALE_UP_INCREMENT must be > 0")
-        
-        if self.scale_down_decrement <= 0:
-            errors.append("SCALE_DOWN_DECREMENT must be > 0")
-        
         # Validate cooldown periods
         if self.scale_up_cooldown < 0:
             errors.append("SCALE_UP_COOLDOWN must be >= 0")
@@ -184,7 +169,7 @@ class ScalingConfig:
         
         if self.general_cooldown < 0:
             errors.append("GENERAL_COOLDOWN must be >= 0")
-        
+
         # Validate other parameters
         if self.target_qps_per_instance <= 0:
             errors.append("TARGET_QPS_PER_INSTANCE must be > 0")
@@ -202,7 +187,11 @@ class ScalingConfig:
         elif self.metric_period < 60:
             logger = logging.getLogger(__name__)
             logger.info(f"METRIC_PERIOD={self.metric_period}s is short. Monitor for API rate limits and scaling stability.")
-        
+
+        # Validate database configuration
+        if not self.db_dsn:
+            errors.append("DB_DSN is required for database connectivity")
+
         if errors:
             raise ValueError("Configuration validation failed:\n" + "\n".join(f"- {error}" for error in errors))
     
@@ -214,6 +203,49 @@ class ScalingConfig:
             QPS threshold for scale-up decision
         """
         return self.target_qps_per_instance * self.scale_up_threshold
+    
+    def get_scale_down_qps_threshold(self) -> float:
+        """
+        Calculate the QPS threshold for scaling down.
+        
+        Returns:
+            QPS threshold for scale-down decision
+        """
+        return self.target_qps_per_instance * self.scale_down_threshold
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert configuration to dictionary.
+        """
+        return {
+            'target_qps_per_instance': self.target_qps_per_instance,
+            'scale_up_threshold': self.scale_up_threshold,
+            'scale_down_threshold': self.scale_down_threshold,
+            'enable_dynamic_scaling': self.enable_dynamic_scaling,
+            'max_scale_up_per_action': self.max_scale_up_per_action,
+            'max_scale_down_per_action': self.max_scale_down_per_action,
+            'scale_up_cooldown': self.scale_up_cooldown,
+            'scale_down_cooldown': self.scale_down_cooldown,
+            'general_cooldown': self.general_cooldown,
+            'metric_period': self.metric_period,
+            'autoscaling_group_id': self.autoscaling_group_id,
+            'alb_id': self.alb_id,
+            'region': self.region,
+            'tos_mount_path': self.tos_mount_path,
+            'tos_state_file': self.tos_state_file,
+            'dry_run_mode': self.dry_run_mode,
+            'alert_webhook_url': self.alert_webhook_url,
+            'log_level': self.log_level,
+            'enable_detailed_logging': self.enable_detailed_logging,
+            'initial_delay_seconds': self.initial_delay_seconds
+        }
+    
+        # Validate database configuration
+        if not self.db_dsn:
+            errors.append("DB_DSN is required for database connectivity")
+        
+        if errors:
+            raise ValueError("Configuration validation failed:\n" + "\n".join(f"- {error}" for error in errors))
     
     def get_scale_down_qps_threshold(self) -> float:
         """
@@ -259,6 +291,20 @@ class ScalingConfig:
             'initial_delay_seconds': self.initial_delay_seconds
         }
     
+    def copy_with_group(self, group_data: Dict[str, Any]) -> 'ScalingConfig':
+        """Creates a copy of the config, overriding with group-specific settings."""
+        new_config = dataclasses.replace(self)
+        new_config.resource_group_id = group_data.get('id', new_config.resource_group_id)
+        new_config.alb_id = group_data.get('alb_id', new_config.alb_id)
+        new_config.autoscaling_group_id = group_data.get('asg_id', new_config.autoscaling_group_id)
+        new_config.region = group_data.get('region', new_config.region)
+        new_config.target_qps_per_instance = float(group_data.get('target_qps', new_config.target_qps_per_instance))
+        new_config.general_cooldown = group_data.get('general_cooldown_seconds', new_config.general_cooldown)
+        new_config.scale_up_cooldown = group_data.get('scale_up_cooldown_seconds', new_config.scale_up_cooldown)
+        new_config.scale_down_cooldown = group_data.get('scale_down_cooldown_seconds', new_config.scale_down_cooldown)
+        new_config.dry_run_mode = group_data.get('dry_run', new_config.dry_run_mode)
+        return new_config
+
     def __str__(self) -> str:
         """
         String representation of configuration (without sensitive data).
@@ -346,14 +392,9 @@ TARGET_QPS_PER_INSTANCE=50
 SCALE_UP_THRESHOLD=0.8
 SCALE_DOWN_THRESHOLD=0.6
 
-# Instance Limits
-MIN_INSTANCES=1
-MAX_INSTANCES=10
-DESIRED_INSTANCES=2
+# Instance Limits are now read from the Auto Scaling Group at runtime.
 
-# Scaling Behavior
-SCALE_UP_INCREMENT=1
-SCALE_DOWN_DECREMENT=1
+# Scaling Behavior is now determined by target QPS and current metrics.
 
 # Dynamic Scaling Configuration
 ENABLE_DYNAMIC_SCALING=true
@@ -390,3 +431,15 @@ LOG_LEVEL=INFO
 ENABLE_DETAILED_LOGGING=false
 INITIAL_DELAY_SECONDS=0
 """
+# Example environment variables:
+#
+# export ACCESS_KEY_ID="your_access_key"
+# export SECRET_ACCESS_KEY="your_secret_key"
+# export REGION="cn-beijing"
+# export ALB_ID="alb-xxxxx"
+# export AUTOSCALING_GROUP_ID="asg-yyyyy"
+# export DB_DSN="postgresql://user:password@host:port/dbname"
+#
+
+if __name__ == "__main__":
+    sys.stdout.flush()  # Ensure immediate output

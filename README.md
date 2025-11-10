@@ -1,286 +1,66 @@
-# BytePlus ALB QPS-based AutoScaling Solution
+# BytePlus ALB QPS-based Autoscaling (Multi-group, DB-backed)
 
-A FaaS-based solution that automatically scales BytePlus AutoScaling Groups based on Application Load Balancer (ALB) QPS metrics.
+This solution is a FaaS function that scales BytePlus AutoScaling Groups based on ALB QPS metrics. It evaluates all enabled resource groups stored in a PostgreSQL database and applies dynamic scaling (scale to meet target QPS).
 
-### 🚨 Disclaimer
-This project is for demonstration purposes and should be thoroughly reviewed and tested before using in production environments.
+## Key capabilities
+- Batch evaluation across multiple resource groups (one ALB ↔ one ASG per group)
+- Per-group policy sourced from Postgres (DB = source of truth)
+- Dynamic scaling (default): compute optimal instances = ceil(QPS / target_qps_per_instance)
+- ASG min/max (from cloud API) enforce capacity bounds
+- Cooldowns: per-group scale_up, scale_down, and general cooldowns
+- Activity recording with idempotency key (group_id + desired_capacity + time bucket)
+- Rich result payloads include alb_id, asg_id per group for easy inspection
 
-## Overview
+## Architecture overview
+- FaaS handler (index.py): loads env, initializes clients, runs batch evaluation
+- Scaling engine (scaling_engine.py): dynamic/static logic, cooldown checks, activity/error recording
+- CloudMonitor client: gets ALB QPS
+- AutoScaling client: reads ASG min/max, status, and performs scale actions
+- Postgres via DBManager: reads resource_groups; writes resource_group_state, scaling_activities, errors
 
-This solution provides QPS-based scaling for GPU instances. Instead of relying on traditional CPU/GPU/Memory utilization metrics, it uses ALB request-per-second data to make scaling decisions. The QPS per instance is calculated by dividing the ALB QPS by the number of instances in the AutoScaling Group.
-
-### ⚠️ Important Note
-
-**This solution only works for simple 1:1:1 configurations:**
-- **1 Server Group** per ALB
-- **1 ALB** per AutoScaling Group  
-- **1 AutoScaling Group** being managed
-
-## Architecture
-
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   ALB           │    │  CloudMonitor    │    │  AutoScaling    │
-│  (Load Balancer)│    │   (Metrics)      │    │    Group        │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                    ┌─────────────────────────┐
-                    │     FaaS Function       │
-                    │  (Autoscaling Logic)    │
-                    └─────────────────────────┘
-                                 │
-                    ┌─────────────────────────┐
-                    │   TOS Object Storage    │
-                    │   (State Persistence)   │
-                    └─────────────────────────┘
-```
-
-## Features
-
-- **QPS-based Scaling**: Scale based on actual request load rather than resource utilization
-- **Dynamic Scaling**: Calculate exact instances needed to achieve target QPS (vs traditional incremental scaling)
-- **Configurable Safety Limits**: Optional per-action scaling limits with flexible configuration
-- **Configurable Thresholds**: Customizable scale-up/scale-down thresholds with hysteresis
-- **Cooldown Management**: Prevents oscillation with configurable cooldown periods
-- **State Persistence**: Uses TOS mount for reliable state management
-- **Safety Mechanisms**: Min/max limits automatically enforced from AutoScaling Group configuration
-- **Comprehensive Logging**: Detailed logging and audit trail
-- **Dry Run Mode**: Test scaling decisions without actual execution
-- **Error Handling**: Robust error handling and validation
-
-## Files Structure
-
-```
-autoscaling-alb-solution/
-├── main.py                    # Main FaaS handler function
-├── config.py                  # Configuration management
-├── byteplus_api_client.py     # BytePlus API client with signing
-├── cloudmonitor_client.py     # CloudMonitor API integration
-├── autoscaling_client.py      # AutoScaling API integration
-├── state_manager.py           # State persistence using TOS
-├── scaling_engine.py          # Core scaling decision logic
-├── requirements.txt           # Python dependencies
-├── README.md                  # This file
-└── .env.example              # Environment variables template
-```
+## Database schema (summary)
+Tables defined in db/postgres_schema.sql:
+- resource_groups(id, alb_id, asg_id, region, target_qps,
+  scale_up_cooldown_seconds, scale_down_cooldown_seconds, general_cooldown_seconds,
+  dry_run, enabled, timestamps)
+- resource_group_state(resource_group_id, last_evaluated_at, cooldown_until,
+  consecutive_errors, circuit_open_until, suspended, latest_qps, latest_capacity, timestamps)
+- scaling_activities(resource_group_id, activity_key, requested_at, action,
+  delta, desired_capacity, status, response, error_message,
+  eval_qps, eval_capacity, target_qps, timestamps)
+- errors(resource_group_id, source, message, context, occurred_at)
 
 ## Configuration
+Environment variables (shared):
+- REQUIRED: DB_DSN, ACCESS_KEY_ID, SECRET_ACCESS_KEY, REGION
+- Optional: METRIC_PERIOD (default 300), LOG_LEVEL, ENABLE_DETAILED_LOGGING, INITIAL_DELAY_SECONDS, ALERT_WEBHOOK_URL
+- Not required in multi‑group mode: AUTOSCALING_GROUP_ID, ALB_ID (sourced per group from DB)
 
-### Required Environment Variables
+Per-group values (from DB):
+- alb_id, asg_id, region
+- target_qps (per instance)
+- scale_up_cooldown_seconds, scale_down_cooldown_seconds, general_cooldown_seconds
+- dry_run, enabled
 
-```bash
-# BytePlus Cloud Configuration (Required)
-AUTOSCALING_GROUP_ID=asg-xxxxx
-ALB_ID=alb-xxxxx
-ACCESS_KEY_ID=your_access_key
-SECRET_ACCESS_KEY=your_secret_key
+## Local testing
+1) Set env in autoscaling-alb-solution/.env (DB_DSN, ACCESS_KEY_ID, SECRET_ACCESS_KEY, REGION)
+2) Apply schema (db/postgres_schema.sql) and insert resource_groups rows
+3) Run:
+   - `set -a; source .env; set +a; python3 local_test.py`
 
-# Core Scaling Parameters (Required)
-TARGET_QPS_PER_INSTANCE=50
-
-# QPS Thresholds (Only used in static mode - ignored in dynamic mode)
-SCALE_UP_THRESHOLD=0.8
-SCALE_DOWN_THRESHOLD=0.6
-
-# Scaling Behavior
-SCALE_UP_INCREMENT=1                     # Used when dynamic scaling is disabled
-SCALE_DOWN_DECREMENT=1                   # Used when dynamic scaling is disabled
-
-# Dynamic Scaling (New)
-ENABLE_DYNAMIC_SCALING=true              # Default: true (calculate exact instances needed)
-MAX_SCALE_UP_PER_ACTION=0                # Default: 0 (no limit, rely on ASG max)
-MAX_SCALE_DOWN_PER_ACTION=0              # Default: 0 (no limit, rely on ASG min)
-
-# Metric Collection (Required - must be > 0)
-METRIC_PERIOD=300
-```
-
-**Note**: Instance limits (min/max/desired) are automatically fetched from the AutoScaling Group configuration at runtime.
-
-### Optional Configuration (with defaults)
-
-```bash
-# BytePlus Cloud Configuration
-REGION=ap-southeast-1                    # Default: ap-southeast-1
-
-# Cooldown Periods (seconds)
-SCALE_UP_COOLDOWN=300                    # Default: 300 (5 minutes)
-SCALE_DOWN_COOLDOWN=600                  # Default: 600 (10 minutes)
-GENERAL_COOLDOWN=180                     # Default: 180 (3 minutes)
-
-# Storage Configuration
-TOS_MOUNT_PATH=/tosmount                 # Default: /tosmount
-TOS_STATE_FILE=scaling_state.json        # Default: scaling_state.json
-
-# Safety & Monitoring
-DRY_RUN_MODE=false                       # Default: false
-ALERT_WEBHOOK_URL=                       # Default: empty (no alerts)
-
-# Function Behavior
-LOG_LEVEL=INFO                           # Default: INFO
-ENABLE_DETAILED_LOGGING=false            # Default: false
-INITIAL_DELAY_SECONDS=0                  # Default: 0 (no delay)
-```
-
-## Dynamic Scaling
-
-The solution supports two scaling modes:
-
-### **Dynamic Mode** (Default: `ENABLE_DYNAMIC_SCALING=true`)
-Calculates exact instances needed to achieve target QPS and scales directly to optimal capacity. **Thresholds are ignored** for maximum cost efficiency.
-
-**Example** (TARGET_QPS_PER_INSTANCE=10):
-- QPS=100, instances=5 → optimal=10 → **scale up by 5**
-- QPS=20, instances=10 → optimal=2 → **scale down by 8**
-- QPS=53, instances=10 → optimal=6 → **scale down by 4** (40% cost savings)
-
-### **Static Mode** (`ENABLE_DYNAMIC_SCALING=false`)
-Traditional threshold-based scaling with fixed increments (backward compatible).
-
-**Example**:
-- QPS above threshold → **scale up by 1** (SCALE_UP_INCREMENT)
-- QPS below threshold → **scale down by 1** (SCALE_DOWN_DECREMENT)
-
-### **Safety Limits**
-- `MAX_SCALE_UP_PER_ACTION=0` → No limit (rely on ASG max)
-- `MAX_SCALE_UP_PER_ACTION=3` → Never add more than 3 instances per action
-
-## Metric Period Configuration
-
-The `METRIC_PERIOD` setting controls how far back the function looks when collecting QPS metrics from the ALB. This is a critical parameter that affects scaling responsiveness and system stability.
-
-### **Recommended Values:**
-
-```bash
-# Production (Recommended)
-METRIC_PERIOD=300    # 5 minutes - Stable, cost-effective, filters noise
-
-# Responsive (Good for dynamic workloads)
-METRIC_PERIOD=60     # 1 minute - Balanced responsiveness and stability
-
-# Aggressive (Use with caution)
-METRIC_PERIOD=30     # 30 seconds - Very responsive, monitor for issues
-```
-
-### **Technical Notes:**
-
-- **Minimum supported**: 10 seconds (with warnings)
-- **API Optimization**: The system automatically selects appropriate CloudMonitor intervals:
-  - ≤30s range → 15s intervals
-  - ≤2min range → 30s intervals  
-  - ≤10min range → 1min intervals
-  - >10min range → 5min intervals
-- **Rate Limiting**: Very short periods may hit BytePlus CloudMonitor API limits
-- **Data Availability**: ALB metrics may not be available at sub-minute granularity
-
-### **Warning System:**
-
-The configuration validation will warn you about potentially problematic settings:
-- `METRIC_PERIOD < 30`: Strong warning about instability risks
-- `METRIC_PERIOD < 60`: Informational notice to monitor for issues
-
-## Prerequisites
-
-Before deploying this autoscaling solution, ensure you have the following BytePlus resources already created:
-
-### Required Resources
-
-1. **AutoScaling Group (ASG)**
-   - Configured with Launch Configuration using **L20 or H20 GPU instances**
-   - Set appropriate min/max capacity limits
-   - Ensure the ASG is in "Active" state
-
-2. **Application Load Balancer (ALB)**
-   - Configured with appropriate listener configurations
-   - Connected to the target server group that corresponds to your ASG
-   - Generating traffic metrics (QPS data)
-
-3. **TOS Bucket** (for state persistence)
-   - Bucket for storing autoscaling state
-   - Appropriate read/write permissions
-
-4. **BytePlus Access Credentials**
-   - Access Key ID and Secret Access Key with permissions for:
-     - CloudMonitor: `GetMetricData`
-     - AutoScaling: `DescribeScalingGroups`, `ModifyScalingGroup`, `DescribeScalingActivities`
-     - TOS: Read/Write access to the state bucket
-
-**Important**: Ensure your ALB → Server Group → ASG configuration follows the 1:1:1 relationship mentioned in the limitation section above.
+Result payload example (per group):
+- Includes: action, reason, current_qps, current_instances, qps_per_instance,
+  target_qps_per_instance, dry_run, alb_id, asg_id, scaling_amount,
+  optimal_instances, required_change, limited_by_safety, activity_key
 
 ## Deployment
+- Package and deploy the function to your FaaS environment
+- Configure the same environment variables (DB_DSN, ACCESS_KEY_ID, SECRET_ACCESS_KEY, REGION)
+- Ensure DB is reachable and resource_groups are populated with enabled=true
+- Set per-group dry_run=true to verify decisions without executing; flip to false for real scaling
 
-### 1. Prepare the Function Package
-
-```bash
-# Create deployment package
-./deploy.sh
-```
-
-### 2. Deploy to BytePlus FaaS
-
-1. Create a new FaaS function in BytePlus Console
-2. Upload the function package
-3. Configure environment variables
-4. Set up TOS mount for state persistence
-5. Configure trigger (timer trigger for periodic execution)
-
-### 3. Configure TOS Mount
-
-1. Create a TOS bucket for state storage
-2. Mount the bucket to `/mnt/tos` in the FaaS function
-3. Ensure the function has read/write permissions
-
-### 4. Set Up Permissions
-
-Ensure the AK/SK configured in the function has the following permissions:
-- CloudMonitor: `GetMetricData`
-- AutoScaling: `DescribeScalingGroups`, `ModifyScalingGroup`, `DescribeScalingActivities`
-- TOS: Read/Write access to the state bucket
-
-## Staggered Execution for Sub-Minute Triggering
-
-If your FaaS platform only supports minute-level triggers but you need more frequent scaling evaluations (e.g., every 30 seconds), you can deploy multiple instances of the same function with staggered delays:
-
-### Setup for 30-second intervals:
-
-1. **Function 1**: `INITIAL_DELAY_SECONDS=0`  (executes at :00)
-2. **Function 2**: `INITIAL_DELAY_SECONDS=30` (executes at :30)
-
-Note: All functions should have identical configuration except for the `INITIAL_DELAY_SECONDS` value.
-
-### Important Notes:
-- Each function must use the **same TOS state file** for coordination
-- All functions must have **identical scaling configuration**
-
-## Monitoring
-
-### Function Response Format
-
-```json
-{
-  "statusCode": 200,
-  "timestamp": "2024-01-15T10:30:00Z",
-  "execution_id": "req-12345",
-  "version": "1.0",
-  "result": {
-    "action": "scale_up",
-    "status": "success",
-    "message": "dynamic_scaling_scale_up",
-    "scaling_amount": 5,
-    "optimal_instances": 10,
-    "details": {
-      "current_qps": 120.5,
-      "current_instances": 2,
-      "qps_per_instance": 60.25,
-      "target_qps_per_instance": 50,
-      "scale_up_threshold": 40,
-      "scale_down_threshold": 30,
-      "dry_run": false,
-      "limited_by_safety": false
-    }
-  },
-  "execution_time_ms": 1250
-}
-```
+## Behavior clarifications
+- Scale‑to‑zero is permitted; if you want to guard against zero, set ASG min to 1
+- ASG min/max are enforced from cloud API at runtime
+- General cooldown, scale_up, and scale_down cooldowns are applied per group
+- Activities are recorded with status 'dry_run' unless real scaling is executed

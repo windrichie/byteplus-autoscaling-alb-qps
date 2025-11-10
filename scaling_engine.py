@@ -22,9 +22,9 @@ class ScalingEngine:
         self.autoscaling_client = autoscaling_client
         self.logger = logging.getLogger(__name__)
     
-    def evaluate_scaling_decision(self) -> Dict[str, Any]:
+    def evaluate_scaling_decision(self, prefetched_qps: Optional[float] = None) -> Dict[str, Any]:
         """
-        Main method to evaluate and execute scaling decisions.
+        Main logic to evaluate and execute scaling decisions.
         
         Returns:
             Dictionary containing the scaling decision and execution result
@@ -37,11 +37,11 @@ class ScalingEngine:
             "current_instances": None,
             "qps_per_instance": None,
             "target_qps_per_instance": self.config.target_qps_per_instance,
-            "scale_up_threshold": self.config.get_scale_up_qps_threshold(),
-            "scale_down_threshold": self.config.get_scale_down_qps_threshold(),
             "dry_run": self.config.dry_run_mode,
             "error": None,
-            "execution_result": None
+            "execution_result": None,
+            "alb_id": self.config.alb_id,
+            "asg_id": self.config.autoscaling_group_id
         }
         
         try:
@@ -52,7 +52,9 @@ class ScalingEngine:
                 return decision_result
             
             # Step 2: Get current metrics
-            current_qps, current_instances = self._get_current_metrics()
+            metrics = self._get_current_metrics(prefetched_qps)
+            current_qps = metrics.get("current_qps")
+            current_instances = metrics.get("current_instances")
             if current_qps is None or current_instances is None:
                 decision_result["reason"] = "metrics_unavailable"
                 decision_result["error"] = "Failed to retrieve required metrics"
@@ -63,7 +65,6 @@ class ScalingEngine:
             
             # Step 3: Calculate QPS per instance (handle cold start)
             if current_instances == 0:
-                # Cold start scenario: avoid division by zero
                 qps_per_instance = 0
                 self.logger.info("Cold start detected: 0 instances, setting QPS per instance to 0")
             else:
@@ -73,26 +74,20 @@ class ScalingEngine:
             
             # Step 4: Evaluate scaling decision
             if self.config.enable_dynamic_scaling:
-                # Use dynamic scaling - calculate exact instances needed
                 dynamic_scaling = self._calculate_dynamic_scaling_amount(current_qps, current_instances)
                 
-                # Check if dynamic scaling suggests an action
                 if dynamic_scaling["action"] != "none":
-                    # Pure dynamic scaling: always execute optimal scaling (no threshold checks)
                     decision_result["action"] = dynamic_scaling["action"]
                     decision_result["scaling_amount"] = dynamic_scaling["amount"]
                     decision_result["optimal_instances"] = dynamic_scaling["optimal_instances"]
                     decision_result["required_change"] = dynamic_scaling["required_change"]
                     decision_result["limited_by_safety"] = dynamic_scaling["limited_by_safety"]
-                    
-                    if dynamic_scaling["limited_by_safety"]:
-                        decision_result["reason"] = f"dynamic_scaling_limited_{dynamic_scaling['action']}"
-                    else:
-                        decision_result["reason"] = f"dynamic_scaling_{dynamic_scaling['action']}"
+                    decision_result["reason"] = (
+                        f"dynamic_scaling_limited_{dynamic_scaling['action']}" if dynamic_scaling["limited_by_safety"]
+                        else f"dynamic_scaling_{dynamic_scaling['action']}"
+                    )
                 else:
-                    # Dynamic scaling suggests no action
                     decision_result["action"] = "none"
-                    # Check if we're at optimal count or constrained by ASG
                     if dynamic_scaling.get("limited_by_asg", False):
                         asg_limit_type = dynamic_scaling.get("asg_limit_type")
                         if asg_limit_type == "min":
@@ -104,16 +99,15 @@ class ScalingEngine:
                     else:
                         decision_result["reason"] = "optimal_instance_count_reached"
             else:
-                # Use traditional threshold-based scaling with static increments
+                # Static mode: include thresholds in the result for transparency
                 scaling_decision = self._evaluate_scaling_need(qps_per_instance, current_instances)
                 decision_result["action"] = scaling_decision["action"]
                 decision_result["reason"] = scaling_decision["reason"]
-                # For static scaling, use configured increments
-                if decision_result["action"] == "scale_up":
-                    decision_result["scaling_amount"] = self.config.scale_up_increment
-                elif decision_result["action"] == "scale_down":
-                    decision_result["scaling_amount"] = self.config.scale_down_decrement
-            
+                decision_result["scale_up_threshold"] = self.config.get_scale_up_qps_threshold()
+                decision_result["scale_down_threshold"] = self.config.get_scale_down_qps_threshold()
+                if decision_result["action"] in ["scale_up", "scale_down"]:
+                    decision_result["scaling_amount"] = 1
+
             # Step 5: Check cooldown periods
             if decision_result["action"] != "none":
                 cooldown_check = self._check_cooldown_periods(decision_result["action"])
@@ -124,70 +118,79 @@ class ScalingEngine:
                     return decision_result
             
             # Step 6: Execute scaling action if needed
-            if decision_result["action"] != "none" and not self.config.dry_run_mode:
-                scaling_amount = decision_result.get("scaling_amount", 1)  # Default to 1 for backward compatibility
-                execution_result = self._execute_scaling_action(decision_result["action"], scaling_amount)
-                decision_result["execution_result"] = execution_result
-            
-            # Step 7: Update state and metrics cache
-            self.state_manager.update_metrics_cache(current_qps, current_instances)
-            
             if decision_result["action"] != "none":
-                activity_data = {
-                    "action": decision_result["action"],
-                    "reason": decision_result["reason"],
-                    "qps_per_instance": qps_per_instance,
-                    "current_qps": current_qps,
-                    "current_instances": current_instances,
-                    "scaling_amount": decision_result.get("scaling_amount", 1),
-                    "dry_run": self.config.dry_run_mode,
-                    "execution_result": decision_result.get("execution_result")
-                }
-                
-                # Add dynamic scaling specific fields if available
-                if "optimal_instances" in decision_result:
-                    activity_data["optimal_instances"] = decision_result["optimal_instances"]
-                    activity_data["required_change"] = decision_result["required_change"]
-                    activity_data["limited_by_safety"] = decision_result["limited_by_safety"]
-                
-                self.state_manager.add_scaling_activity(activity_data)
-            
+                # Compute desired capacity and activity key (group_id + desired_capacity + time bucket)
+                scaling_amount = decision_result.get("scaling_amount", 1)
+                if decision_result["action"] == "scale_up":
+                    desired_capacity = current_instances + scaling_amount
+                elif decision_result["action"] == "scale_down":
+                    desired_capacity = max(0, current_instances - scaling_amount)
+                else:
+                    desired_capacity = current_instances
+                time_bucket = int(datetime.now(timezone.utc).timestamp() // max(self.config.metric_period, 60))
+                activity_key = f"{self.config.resource_group_id}-{desired_capacity}-{time_bucket}"
+                decision_result["activity_key"] = activity_key
+
+                if not self.config.dry_run_mode:
+                    execution_result = self._execute_scaling_action(decision_result["action"], scaling_amount)
+                    decision_result["execution_result"] = execution_result
+
+                # Record the activity before returning
+                exec_status = (decision_result.get("execution_result") or {}).get("status", "dry_run")
+                self.state_manager.record_scaling_activity(
+                    group_id=self.config.resource_group_id,
+                    activity_key=activity_key,
+                    action=decision_result["action"],
+                    status=exec_status,
+                    eval_qps=current_qps,
+                    eval_capacity=current_instances,
+                    target_qps=decision_result["target_qps_per_instance"],
+                    response=decision_result
+                )
+
             return decision_result
-            
+
         except Exception as e:
             error_msg = f"Error during scaling evaluation: {str(e)}"
             self.logger.error(error_msg)
             decision_result["error"] = error_msg
             decision_result["reason"] = "evaluation_error"
-            self.state_manager.record_error(error_msg, "scaling_evaluation")
+            self.state_manager.record_error(
+                group_id=self.config.resource_group_id,
+                source="scaling_evaluation",
+                message=error_msg,
+                context=decision_result
+            )
             return decision_result
     
-    def _get_current_metrics(self) -> Tuple[Optional[float], Optional[int]]:
+    def _get_current_metrics(self, prefetched_qps: Optional[float] = None) -> Dict[str, Any]:
         """
         Get current QPS and instance count.
-        
-        Returns:
-            Tuple of (current_qps, current_instances)
         """
         try:
-            # Get QPS metrics using metric_period directly in seconds
-            current_qps = self.cloudmonitor_client.get_average_qps(
-                self.config.alb_id, 
-                period_seconds=self.config.metric_period
-            )
-            
-            # Get current instance count
+            # Use prefetched QPS if available
+            if prefetched_qps is not None:
+                current_qps = prefetched_qps
+                self.logger.info(f"Using prefetched average QPS: {current_qps:.2f}")
+            else:
+                current_qps = self.cloudmonitor_client.get_average_qps(
+                    self.config.alb_id,
+                    period_seconds=self.config.metric_period
+                )
+                if current_qps is not None:
+                    self.logger.info(f"Fetched average QPS: {current_qps:.2f}")
+
             current_instances = self.autoscaling_client.get_healthy_instance_count(
                 self.config.autoscaling_group_id
             )
             
             self.logger.info(f"Current metrics - QPS: {current_qps}, Instances: {current_instances}")
-            return current_qps, current_instances
+            return {"current_qps": current_qps, "current_instances": current_instances}
             
         except Exception as e:
             self.logger.error(f"Failed to get current metrics: {e}")
-            return None, None
-    
+            return {"current_qps": None, "current_instances": None}
+
     def _calculate_dynamic_scaling_amount(self, current_qps: float, current_instances: int) -> Dict[str, Any]:
         """
         Calculate the required scaling amount to achieve target QPS per instance.
@@ -203,8 +206,8 @@ class ScalingEngine:
         # Defensive check: prevent division by zero
         if self.config.target_qps_per_instance <= 0:
             self.logger.error(f"Invalid target_qps_per_instance: {self.config.target_qps_per_instance}. Must be > 0.")
-            # Fallback: assume 1 instance is needed (conservative approach)
-            optimal_instances = 1
+            # Misconfiguration: choose 0 and rely on ASG min to guard if needed
+            optimal_instances = 0
         else:
             optimal_instances = math.ceil(current_qps / self.config.target_qps_per_instance)
         
@@ -315,6 +318,7 @@ class ScalingEngine:
     def _check_cooldown_periods(self, action: str) -> Dict[str, Any]:
         """
         Check if the action is allowed based on cooldown periods.
+        Uses ASG scaling activities as the source of truth so that scheduled/manual activities are respected.
         
         Args:
             action: Scaling action to check
@@ -327,23 +331,29 @@ class ScalingEngine:
             "scale_down": self.config.scale_down_cooldown
         }
         
-        # Check general cooldown first
-        if self.state_manager.is_in_cooldown("general", self.config.general_cooldown):
+        # General cooldown: any recent scaling activity blocks new actions
+        last_any_activity_time = self._get_latest_activity_time(None)
+        remaining_general = self._get_remaining_cooldown_from_time(last_any_activity_time, self.config.general_cooldown)
+        if remaining_general > 0:
             return {
                 "allowed": False,
                 "type": "general",
-                "remaining_seconds": self._get_remaining_cooldown("general", self.config.general_cooldown)
+                "remaining_seconds": remaining_general
             }
         
-        # Check specific action cooldown
+        # Specific action cooldown: check last ScaleOut/ScaleIn accordingly
         if action in cooldown_checks:
             cooldown_period = cooldown_checks[action]
-            if cooldown_period > 0 and self.state_manager.is_in_cooldown(action, cooldown_period):
-                return {
-                    "allowed": False,
-                    "type": action,
-                    "remaining_seconds": self._get_remaining_cooldown(action, cooldown_period)
-                }
+            if cooldown_period > 0:
+                activity_type = "ScaleOut" if action == "scale_up" else "ScaleIn"
+                last_specific_time = self._get_latest_activity_time(activity_type)
+                remaining_specific = self._get_remaining_cooldown_from_time(last_specific_time, cooldown_period)
+                if remaining_specific > 0:
+                    return {
+                        "allowed": False,
+                        "type": action,
+                        "remaining_seconds": remaining_specific
+                    }
         
         return {"allowed": True, "type": None, "remaining_seconds": 0}
     
@@ -359,6 +369,7 @@ class ScalingEngine:
             Remaining cooldown time in seconds
         """
         try:
+            # Fallback to local state if needed; primary checks are handled by _check_cooldown_periods via activities
             cooldown_state = self.state_manager.get_cooldown_state()
             timestamp_key = {
                 "scale_up": "last_scale_up",
@@ -374,6 +385,57 @@ class ScalingEngine:
             return 0
         except Exception:
             return 0
+    
+    def _get_latest_activity_time(self, activity_type: Optional[str]) -> Optional[datetime]:
+        """Return the most recent activity time, optionally filtered by ActivityType ('ScaleOut' or 'ScaleIn')."""
+        try:
+            activities = self.autoscaling_client.get_scaling_activities(
+                self.config.autoscaling_group_id,
+                page_size=20  # Fetch more to find a relevant one
+            )
+            if not activities:
+                return None
+
+            def parse_created_at(item: Dict[str, Any]) -> Optional[datetime]:
+                ts = item.get("CreatedAt")
+                if not ts:
+                    return None
+                try:
+                    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    return None
+
+            # Filter for relevant, successful, or in-progress activities
+            valid_statuses = {"Success", "PartialSuccess", "Running", "Init"}
+            
+            filtered_activities = []
+            for a in activities:
+                if a.get("StatusCode") in valid_statuses:
+                    if activity_type and a.get("ActivityType") == activity_type:
+                        filtered_activities.append(a)
+                    elif not activity_type:
+                        filtered_activities.append(a)
+
+            if not filtered_activities:
+                return None
+
+            times = [parse_created_at(a) for a in filtered_activities]
+            valid_times = [t for t in times if t is not None]
+
+            if not valid_times:
+                return None
+                
+            return max(valid_times)
+        except Exception as e:
+            self.logger.error(f"Failed to get latest activity time: {e}")
+            return None
+    
+    def _get_remaining_cooldown_from_time(self, last_time: Optional[datetime], cooldown_seconds: int) -> int:
+        """Compute remaining cooldown seconds given a last activity time."""
+        if last_time is None:
+            return 0
+        elapsed = (datetime.now(timezone.utc) - last_time).total_seconds()
+        return max(0, int(cooldown_seconds - elapsed))
     
     def _is_scaling_in_progress(self) -> bool:
         """
@@ -406,13 +468,18 @@ class ScalingEngine:
                 return self._execute_scale_down(scaling_amount)
             else:
                 return {"status": "error", "message": f"Unknown action: {action}"}
-                
+
         except Exception as e:
             error_msg = f"Failed to execute {action}: {str(e)}"
             self.logger.error(error_msg)
-            self.state_manager.record_error(error_msg, "scaling_execution")
+            self.state_manager.record_error(
+                group_id=self.config.autoscaling_group_id,
+                source="scaling_execution",
+                message=error_msg,
+                context={"action": action, "scaling_amount": scaling_amount}
+            )
             return {"status": "error", "message": error_msg}
-    
+
     def _execute_scale_up(self, scaling_amount: int = None) -> Dict[str, Any]:
         """
         Execute scale-up action.
@@ -433,35 +500,34 @@ class ScalingEngine:
                 self.config.autoscaling_group_id,
                 scaling_amount
             )
-            
+
             # Update cooldown state
-            self.state_manager.update_cooldown_state("scale_up")
-            
-            # Clear error count on successful operation
-            self.state_manager.clear_error_count()
-            
+            self.state_manager.update_cooldown_state(self.config.autoscaling_group_id, self.config.scale_up_cooldown)
+
             self.logger.info("Scale-up executed successfully")
             return {"status": "success", "result": result}
-            
+
         except Exception as e:
             error_msg = f"Scale-up execution failed: {str(e)}"
             self.logger.error(error_msg)
-            self.state_manager.record_error(error_msg, "scale_up_execution")
+            self.state_manager.record_error(
+                group_id=self.config.autoscaling_group_id,
+                source="scale_up_execution",
+                message=error_msg,
+                context={"scaling_amount": scaling_amount}
+            )
             return {"status": "error", "message": error_msg}
-    
-    def _execute_scale_down(self, scaling_amount: int = None) -> Dict[str, Any]:
+
+    def _execute_scale_down(self, scaling_amount: int) -> Dict[str, Any]:
         """
         Execute scale-down action.
         
         Args:
-            scaling_amount: Number of instances to remove (defaults to config decrement)
-        
+            scaling_amount: Number of instances to remove
+
         Returns:
             Execution result
         """
-        if scaling_amount is None:
-            scaling_amount = self.config.scale_down_decrement
-            
         try:
             self.logger.info(f"Executing scale-down by {scaling_amount} instances")
             
@@ -469,22 +535,24 @@ class ScalingEngine:
                 self.config.autoscaling_group_id,
                 scaling_amount
             )
-            
+
             # Update cooldown state
-            self.state_manager.update_cooldown_state("scale_down")
-            
-            # Clear error count on successful operation
-            self.state_manager.clear_error_count()
-            
+            self.state_manager.update_cooldown_state(self.config.autoscaling_group_id, self.config.scale_down_cooldown)
+
             self.logger.info("Scale-down executed successfully")
             return {"status": "success", "result": result}
-            
+
         except Exception as e:
             error_msg = f"Scale-down execution failed: {str(e)}"
             self.logger.error(error_msg)
-            self.state_manager.record_error(error_msg, "scale_down_execution")
+            self.state_manager.record_error(
+                group_id=self.config.autoscaling_group_id,
+                source="scale_down_execution",
+                message=error_msg,
+                context={"scaling_amount": scaling_amount}
+            )
             return {"status": "error", "message": error_msg}
-    
+
     def get_current_status(self) -> Dict[str, Any]:
         """
         Get current status of the scaling system.
