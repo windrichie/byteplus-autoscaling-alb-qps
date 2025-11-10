@@ -53,11 +53,27 @@ Result payload example (per group):
   target_qps_per_instance, dry_run, alb_id, asg_id, scaling_amount,
   optimal_instances, required_change, limited_by_safety, activity_key
 
-## Deployment
-- Package and deploy the function to your FaaS environment
-- Configure the same environment variables (DB_DSN, ACCESS_KEY_ID, SECRET_ACCESS_KEY, REGION)
-- Ensure DB is reachable and resource_groups are populated with enabled=true
-- Set per-group dry_run=true to verify decisions without executing; flip to false for real scaling
+## Deployment Steps
+
+1) Prepare PostgreSQL database
+- Ensure a reachable PostgreSQL instance (host/port/auth). Choose your database name and schema.
+- Apply schema: run db/postgres_schema.sql to create tables and triggers.
+- Seed resource groups: run db/sample_queries.sql and adjust values (alb_id, asg_id, region, target_qps, cooldowns, dry_run, enabled) to your environment.
+
+2) Prepare cloud resources
+- Create and configure ALBs and AutoScaling Groups.
+- Note required identifiers: ALB IDs, ASG IDs, region.
+- Decide per-group target_qps (per instance) and cooldowns (scale_up, scale_down, general).
+- Set ASG min/max; if you want to guard against scale-to-zero, set ASG min=1.
+
+3) Deploy function to BytePlus FaaS
+- Package and deploy this codebase to BytePlus Function Service.
+- Configure env vars: DB_DSN, ACCESS_KEY_ID, SECRET_ACCESS_KEY, REGION. Optionally METRIC_PERIOD, LOG_LEVEL, ENABLE_DETAILED_LOGGING, INITIAL_DELAY_SECONDS, ALERT_WEBHOOK_URL.
+- Ensure the function can reach the DB host.
+- For initial verification, set per-group dry_run=true; switch to false for real scaling.
+
+Run locally for validation:
+- `set -a; source .env; set +a; python3 local_test.py`
 
 ## Behavior clarifications
 - Scale‑to‑zero is permitted; if you want to guard against zero, set ASG min to 1
